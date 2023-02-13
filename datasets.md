@@ -25,5 +25,5 @@ ln -s /projects/US/ProjectDatasets/db/thyroid datasets/tus_data
 
 ## 3. 数据集的注册
 
-d2所使用的数据集需要经过注册才能使用，下面先从一般角度介绍d2的数据集注册机制。
+d2所使用的数据集需要经过注册才能使用，下面先从一般角度介绍[d2的数据集注册机制](datasets_d2register.md)。
 
