@@ -62,6 +62,7 @@ model = model_registry(class_name)(args)
 这部分就直接展示注册类的代码了，有兴趣的朋友可以研究一下其中的细节，个人觉得对装饰器的应用是非常的好了
 
 ```python
+# from detectron2.utils.registry import Registry
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 class Registry(object):
 
