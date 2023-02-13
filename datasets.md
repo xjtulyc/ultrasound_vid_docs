@@ -290,3 +290,107 @@ mapper(可调用):一个可调用对象，它从数据集和数据集中获取�
 
 返回:
 一个torch DataLoader对象
+
+```python
+def build_video_detection_train_loader(cfg, mapper=None):
+    """
+    A data loader is created by the following steps:
+
+    1. Use the dataset names in config to query :class:`DatasetCatalog`, and obtain a list of dicts.
+    2. Start workers to work on the dicts. Each worker will:
+      * Map each metadata dict into another format to be consumed by the model.
+      * Batch them by simply putting dicts into a list.
+    The batched ``list[mapped_dict]`` is what this dataloader will return.
+
+    Args:
+        cfg (CfgNode): the config
+        mapper (callable): a callable which takes a sample (dict) from dataset and
+            returns the format to be consumed by the model.
+            By default it will be `DatasetMapper(cfg, True)`.
+
+    Returns:
+        a torch DataLoader object
+    """
+    num_workers = get_world_size()
+    segs_per_batch = cfg.SOLVER.SEGS_PER_BATCH
+    assert (
+        segs_per_batch % num_workers == 0
+    ), "SOLVER.SEGS_PER_BATCH ({}) must be divisible by the number of workers ({}).".format(
+        segs_per_batch, num_workers
+    )
+    assert (
+        segs_per_batch >= num_workers
+    ), "SOLVER.SEGS_PER_BATCH ({}) must be larger than the number of workers ({}).".format(
+        segs_per_batch, num_workers
+    )
+    segs_per_worker = segs_per_batch // num_workers
+
+    dataset_dicts = []
+    if cfg.DATASETS.BUS_TRAIN:
+        dataset_dicts.append(
+            get_video_detection_dataset_dicts(
+                [
+                    "breast_" + hospital + "@" + cfg.DATASETS.BUS_TIMESTAMP
+                    for hospital in cfg.DATASETS.BUS_TRAIN
+                ],
+                cfg,
+                is_train=True,
+            )
+        )
+    if cfg.DATASETS.TUS_TRAIN:
+        dataset_dicts.append(
+            get_video_detection_dataset_dicts(
+                [
+                    "thyroid_" + hospital + "@" + cfg.DATASETS.TUS_TIMESTAMP
+                    for hospital in cfg.DATASETS.TUS_TRAIN
+                ],
+                cfg,
+                is_train=True,
+            )
+        )
+    datasets = [
+        DatasetFromList(dataset_dict, copy=False) for dataset_dict in dataset_dicts
+    ]
+
+    if mapper is None:
+        mapper = UltrasoundTrainingMapper(cfg, is_train=True)
+    datasets = [MapDataset(dataset, mapper) for dataset in datasets]
+
+    sampler_name = cfg.DATALOADER.SAMPLER_TRAIN
+    frame_sampler_name = cfg.DATASETS.FRAMESAMPLER
+    logger = logging.getLogger(__name__)
+    logger.info(
+        "Using training sampler {} with frame sampler {}".format(
+            sampler_name, frame_sampler_name
+        )
+    )
+    data_loaders = []
+    for dataset in datasets:
+        if sampler_name == "TrainingSampler":
+            sampler = samplers.TrainingSampler(len(dataset))
+        elif sampler_name == "IsolateTrainingSampler":
+            sampler = IsolateTrainingSampler(len(dataset))
+        elif sampler_name == "RepeatFactorTrainingSampler":
+            sampler = samplers.RepeatFactorTrainingSampler(
+                dataset_dicts, cfg.DATALOADER.REPEAT_THRESHOLD
+            )
+        else:
+            raise ValueError("Unknown training sampler: {}".format(sampler_name))
+
+        batch_sampler = torch.utils.data.sampler.BatchSampler(
+            sampler, segs_per_worker, drop_last=True
+        )
+        collate_fn = trivial_batch_collator
+        # drop_last so the batch always have the same size
+
+        data_loader = torch.utils.data.DataLoader(
+            dataset,
+            num_workers=cfg.DATALOADER.NUM_WORKERS,
+            batch_sampler=batch_sampler,
+            collate_fn=collate_fn,
+            worker_init_fn=worker_init_reset_seed,
+        )
+        data_loaders.append(data_loader)
+
+    return balanced_multi_data_loader(data_loaders)
+```
