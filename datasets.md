@@ -23,7 +23,7 @@ ln -s /projects/US/ProjectDatasets/db/thyroid datasets/tus_data
 ![](file/datasets_soft_link.png)
 
 
-## 3. 数据集的注册
+## 3. 数据集的注册和加载
 学习使用一个框架，首先要了解框架的基本原理，之后才应该阅读项目的代码。
 
 d2所使用的数据集需要经过注册才能使用，下面先从一般角度介绍[d2的数据集注册机制](datasets_d2register.md)。
@@ -258,3 +258,35 @@ def load_ultrasound_annotations(
 |:---|---|---|---|---|---:|
 |视频帧数|标注框|裁剪尺寸|高度缩放比例|静止帧位置|有无标注框|
 
+## 4. 数据加载器（dataloader）
+
+在``tools/train_net.py``的类``Trainer``中可以找到实例化数据集和迭代的内容。
+
+```python
+@classmethod
+def build_test_loader(cls, cfg, dataset_name):
+    return build_video_detection_test_loader(cfg, dataset_name)
+
+@classmethod
+def build_train_loader(cls, cfg):
+    if cfg.DATASETS.SAMPLE_FP_BY_VIDEO:
+        return build_video_detection_train_hardmining_fp_loader(cfg)
+    return build_video_detection_train_loader(cfg)
+```
+
+数据加载器的创建步骤如下:
+
+1. 使用配置中的数据集名称来查询:``class:DatasetCatalog``，并获得字典列表（一个视频每一帧的标注信息）。
+2. 让worker在字典上处理数据。每个worker将:
+   1. 将每个元数据字典映射为模型使用的另一种格式。
+   2. 通过简单地将字典放入列表来批量处理它们。
+批处理的列表``list[mapped_dict]``是这个数据加载器将返回的内容。
+
+参数:
+cfg (CfgNode)：配置参数
+mapper(可调用):一个可调用对象，它从数据集和数据集中获取样本(dict)
+返回模型要使用的格式。
+默认情况下是``DatasetMapper(cfg, True)``。
+
+返回:
+一个torch DataLoader对象
