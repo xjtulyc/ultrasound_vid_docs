@@ -11,7 +11,7 @@ class DynamicHead(nn.Module):
 
 ## 1. 目的
 
-## 1.1. 注册机制的使用方法
+### 1.1. 注册机制的使用方法
 首先来看一下注册机制是如何使用的：
 ```python
 registry_machine = Registry('registry_machine')
@@ -38,7 +38,7 @@ if __name__ == '__main__':
 
 注册机可以使用和函数名相同的字符串（如上例中的`print_hello_word`和`print_hi_world`）来返回一个函数对象，我们可以传入参数执行函数的内容。
 
-## 1.2. 为什么使用注册类
+### 1.2. 为什么使用注册类
 对于detectron2这种，需要支持许多不同的模型的大型框架，理想情况下所有的模型的参数都希望写在配置文件中，那问题来了，如果我希望根据我的配置文件，决定我是需要用VGG还是用ResNet ，我要怎么写呢？
 
 如果是我，我可能会写出这种可扩展性超级低的暴搓的代码：
@@ -126,3 +126,87 @@ if __name__ == '__main__':
     cfg2 = 'print_hi_word'
     registry_machine.get(cfg2)('world')
 ```
+
+
+## 3. d2的数据集的注册
+### 3.1. 数据集注册
+数据集注册的实际意义：将数据集的一些信息提前保存在类中，方便全局调用。
+
+在Detectron2中，类`DatasetCatalog`管理所有的数据集。类中的只有一个字典类型变量`_REGISTERED`，保存数据集的名称以及对应的加载函数。
+
+类`MetadataCatalog`保存了数据集具体的一些信息。类中只有一个字典类型变量`_NAME_TO_META`，保存数据集名称与对应的类`Metadata`。
+
+类`Metadata`保存我们实际需要的数据集所有信息，如数据集中类别ID与连续ID的对应，类别名称，数据集路径，novel类，base类等等。
+
+**实际注册的步骤：**
+
+1. 将数据集名称和对应的加载函数注册到类``DatasetCatalog``中
+
+
+```python
+DatasetCatalog.register(
+        name,
+        lambda: load_coco_json(annofile, imgdir, metadata, name,
+                               extra_annotation_keys=['id']),
+    )
+```
+2. 将数据集的具体信息保存在类``MetadataCatalog``中
+
+```python
+MetadataCatalog.get(name).set(
+        json_file=annofile,
+        image_root=imgdir,
+        evaluator_type="coco",
+        dirname="datasets/coco",
+        **metadata,
+    )
+```
+
+代码保存在``data/builtin``,通过函数``register_all_coco``注册所有的数据集
+### 3.2. 加载数据集
+在Detectron2中，训练或者测试使用到的数据集定义在``config.yaml``中，如下形式：
+
+```yaml
+DATASETS:
+  TRAIN: ('coco_trainval_base',)
+```
+
+代码中加载数据集在类``Trainer``的初始化部分，具体写法如下：
+
+```python
+def __init__(self, cfg):
+        data_loader = self.build_train_loader(cfg)
+```
+
+实例化类Trainer后，其中的属性data_loader就已经加载好了数据集。所以实质上加载数据集的代码就是在``self.build_train_loader()``函数中。 函数里面的操作有很多，实际上加载数据的代码就是
+
+```python
+dataset_dicts = [DatasetCatalog.get(dataset_name) for dataset_name in dataset_names]
+```
+
+之前注册的时候提到过，类``DatasetCatalog``里面保存的是数据集名称以及对应的加载函数。所以``dataset_dicts``保存的是函数``load_coco_json()``的返回值。
+
+**注意**：函数``load_coco_json()``就是负责读取数据集的图片以及标签json文件，要仔细阅读。
+
+``dataset_dicts``保存了数据集中的所有图片和相对应的标签数据，下一步就是根据需求进行数据增强的操作，这一部分的代码写法如下：
+
+```python
+if mapper is None:
+    mapper = DatasetMapper(cfg, True)
+dataset = MapDataset(dataset, mapper)
+```
+所以数据增强部分的代码在类``DatasetMapper``中，如果对图片或者标签要进行修改的话，就应该关注类``DatasetMapper``。
+
+经过上述描述之后，实例化类``Trainer``的时候就已经加载好了数据集，保存在``Trainer.data_loader``中。
+
+### 3.3. 读取数据参加训练
+``Trainer.data_loader``中数据是可以直接参加训练或者推理。
+
+Detectron2框架中循环迭代数据的代码在类``SimpleTrainer.run_step(self)``，具体写法如下：
+
+```python
+data = next(self._data_loader_iter)  # 获取当前batch的训练数据
+loss_dict = self.model(data)  # 数据输入到模型，输出损失
+```
+
+至此，就已经成功加载并读取了指定数据集中的数据，并将数据送入模型获取输出。
