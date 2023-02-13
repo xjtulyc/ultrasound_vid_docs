@@ -257,3 +257,4 @@ def load_ultrasound_annotations(
 |num_frames|bbox|cropped_shape|height_resize_ratio|static_frames|empty_flag|
 |:---|---|---|---|---|---:|
 |视频帧数|标注框|裁剪尺寸|高度缩放比例|静止帧位置|有无标注框|
+
