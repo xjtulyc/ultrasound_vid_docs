@@ -72,3 +72,158 @@ friend:{name:zhangsan,age:20}
 2. 将cfg解析为**树状**的数据结构；
 3. 在文件中调用配置参数。
 
+### 2.1. 根据``.yaml``文件的路径获得cfg
+
+在Python脚本中代码如下，便可获得原始配置文件
+
+```python
+from detectron2.engine import default_argument_parser   # 按照d2默认参数输入格式获取配置，可以参考源代码或官方文档
+from detectron2.config import get_cfg   # 获取cfg的备份，返回一个d2 CfgNode实例
+
+args = default_argument_parser().parse_args()   # 获取d2默认的参数
+
+cfg = get_cfg()
+# 将配置文件解析
+add_ultrasound_config(cfg)  # 一个复杂的检测系统由多个模块组成，分模块解析有助于代码可读；下面几步是模型层面的参数配置
+add_defcn_config(cfg)
+add_sparsercnn_config(cfg)
+add_deformable_detr_config(cfg)
+cfg.merge_from_file(args.config_file)   # 配置文件也可以继承基类文件，优化器、数据集等的配置在下面进行
+cfg.merge_from_list(args.opts)
+if cfg.AUTO_DIR:
+    cfg.OUTPUT_DIR = os.path.join(
+        "outputs", os.path.splitext(os.path.basename(args.config_file))[0]
+    )
+
+cfg.freeze()    # 冻结配置文件
+default_setup(cfg, args)
+setup_logger(
+    output=cfg.OUTPUT_DIR,
+    distributed_rank=comm.get_rank(),
+    name="ultrasound_vid",
+    abbrev_name="vid",
+)
+```
+
+在bash脚本中，应该按照d2的参数名称来写。请查阅[d2文档](https://detectron2.readthedocs.io/en/latest/tutorials/)
+
+### 2.2. 将cfg解析为**树状**的数据结构
+配置文件其实是指定参数用的，需要解析为d2可以使用的数据结构（CfgNode）才能在代码中真正调用。
+
+```python
+from detectron2.config import CfgNode as CN # create node
+
+def add_ultrasound_config(cfg):
+    """
+    Add config for ultrasound videos.
+    """
+    # 可以理解为默认参数
+    # We use n_fold cross validation for evaluation.
+    # Number of folds
+    cfg.DEVICE_WISE = False
+    cfg.DATASETS.NUM_FOLDS = 5
+    cfg.DATASETS.JSON_NUM_FOLDS = 5
+    # IDs of test folds, every entry in [0, num_folds - 1]
+    cfg.DATASETS.TEST_FOLDS = (0,)
+    cfg.DATASETS.JSON_TEST_FOLDS = (0,)
+    # which sampler?
+    cfg.DATASETS.FRAMESAMPLER = "HardMiningFrameSampler"
+    # which data version?
+    cfg.DATASETS.BUS_TIMESTAMP = ""
+    cfg.DATASETS.BUS_TRAIN = ()
+    cfg.DATASETS.BUS_TEST = ()
+    cfg.DATASETS.TUS_TIMESTAMP = ""
+    cfg.DATASETS.TUS_TRAIN = ()
+    cfg.DATASETS.TUS_TEST = ()
+    cfg.DATASETS.GROUP = ()
+    # False Positive
+    cfg.DATASETS.SAMPLE_FP_BY_VIDEO = False
+    cfg.DATASETS.FP_VIDEO_SAMPLE_RATE = 0.5
+    cfg.DATASETS.FP_FRAMES_PATH = "notebook/fp_frames.json"
+
+    # Segments per batch for training
+    cfg.SOLVER.SEGS_PER_BATCH = 16
+    cfg.SOLVER.CHECKPOINT_PERIOD = 5000
+    cfg.TEST.EVAL_PERIOD = 50000
+
+    # Frame sampler for training
+    cfg.INPUT.TRAIN_FRAME_SAMPLER = CN()
+    # Sample interval
+    cfg.INPUT.TRAIN_FRAME_SAMPLER.INTERVAL = 30
+    # Number of output frames
+    cfg.INPUT.TRAIN_FRAME_SAMPLER.NUM_OUT_FRAMES = 10
+    # HardMining False Positive
+    cfg.INPUT.TRAIN_FRAME_SAMPLER.FP_JSON_DIR = ""
+    cfg.INPUT.TRAIN_FRAME_SAMPLER.FP_SAMPLE_RATE = 1.5
+    
+    # Fixed area
+    cfg.INPUT.FIXED_AREA_TRAIN = 0
+    cfg.INPUT.FIXED_AREA_TEST = 0
+
+    # Parameters for backbone
+    cfg.MODEL.USE_LSTM = True
+    cfg.MODEL.RESNETS.HALF_CHANNEL = False
+    cfg.MODEL.RESNETS.RES5_OUT_CHANNEL = 512
+
+    # Reset NMS parameters
+    cfg.MODEL.RPN.PRE_NMS_TOPK_TRAIN = 256
+    cfg.MODEL.RPN.PRE_NMS_TOPK_TEST = 256
+    cfg.MODEL.RPN.POST_NMS_TOPK_TRAIN = 128
+    cfg.MODEL.RPN.POST_NMS_TOPK_TEST = 128
+    cfg.MODEL.ANCHOR_GENERATOR.ASPECT_RATIOS = [[0.33, 0.5, 0.66, 1.0, 2.0, 3.0]]
+
+    # Config for temporal retinanet
+    cfg.MODEL.RETINANET.INTERVAL_PRE_TEST = 12
+    cfg.MODEL.RETINANET.INTERVAL_AFTER_TEST = 3
+
+    # Config for temporal relation
+    cfg.MODEL.ROI_BOX_HEAD.RELATION_HEAD_NUMS = 8
+    cfg.MODEL.ROI_BOX_HEAD.RELATION_LAYER_NUMS = 2
+    cfg.MODEL.ROI_BOX_HEAD.INTERVAL_PRE_TEST = 12
+    cfg.MODEL.ROI_BOX_HEAD.INTERVAL_AFTER_TEST = 3
+
+    # To evaluate mAP
+    cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.0
+
+    cfg.MODEL.ROI_HEADS.NUM_CLASSES = 1
+
+    # ROI heads sampler
+    cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = 16
+    cfg.MODEL.ROI_HEADS.POSITIVE_FRACTION = 0.5
+
+    cfg.MODEL.ROI_HEADS.PROPOSAL_APPEND_GT = True
+    cfg.MODEL.MASK_ON = False
+
+    cfg.DATALOADER.ASPECT_RATIO_GROUPING = False
+    cfg.DATALOADER.REFRESH_PERIOD = 0
+
+    cfg.INPUT.SCALE_TRAIN = (1.0, 1.0)
+    cfg.INPUT.SCALE_TEST = 1.0
+
+    cfg.MODEL.SAMPLE_BLOCK_OUT_CHANNEL = 256
+    cfg.MODEL.SAMPLE_BLOCK_ALPHA = 0.9
+
+    # organ-specific
+    cfg.MODEL.ORGAN_SPECIFIC = CN()
+    cfg.MODEL.ORGAN_SPECIFIC.ENABLE = ()  # 'cls', 'reg'
+    cfg.MODEL.ORGAN_SPECIFIC.BREAST_LOSS_WEIGHT = 1.0
+    cfg.MODEL.ORGAN_SPECIFIC.THYROID_LOSS_WEIGHT = 1.0
+
+    # misc
+    cfg.AUTO_DIR = False
+
+    # solver
+    cfg.SOLVER.ADAM_BETA = (0.9, 0.999)
+
+    # static frame
+    cfg.STATIC_FRAME = CN() # 需要创建新节点
+    cfg.STATIC_FRAME.RATE = 0.0
+```
+
+### 2.3. 在文件中调用配置参数
+
+如下所示：
+
+```python
+static_frame_rate = cfg.STATIC_FRAME.RATE
+```
