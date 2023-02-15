@@ -226,3 +226,4 @@ MODEL:
     INTERVAL_AFTER_TEST: 0
 ```
 
+模型源代码阅读，请见[模型代码](model_source_code.md)。
