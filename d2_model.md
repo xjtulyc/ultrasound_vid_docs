@@ -115,3 +115,67 @@ mask_features = model.roi_heads.mask_pooler(mask_features, [x.pred_boxes for x i
 
 所有选项都需要您阅读现有模型的文档，有时还需要阅读现有模型的代码以了解内部逻辑，以便编写代码来获取内部张量。
 
+
+## 2. 自定义模型
+
+如果您正在尝试做一些全新的事情，您可能希望完全从头开始实施一个模型。但是，在许多情况下，您可能对修改或扩展现有模型的某些组件感兴趣。因此，我们还提供了一些机制，让用户可以覆盖标准模型的某些内部组件的行为。
+
+### 2.1. 注册新组件
+
+对于用户经常想要自定义的常见概念，例如“backbone feature extractor”、“box head”，我们提供了一种注册机制，供用户注入自定义实现，这些实现将立即在配置文件中使用。
+例如，要添加一个新的主干，请在您的代码中导入此代码：
+
+```python
+from detectron2.modeling import BACKBONE_REGISTRY, Backbone, ShapeSpec
+
+@BACKBONE_REGISTRY.register()
+class ToyBackbone(Backbone):
+  def __init__(self, cfg, input_shape):
+    super().__init__()
+    # create your own backbone
+    self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=16, padding=3)
+
+  def forward(self, image):
+    return {"conv1": self.conv1(image)}
+
+  def output_shape(self):
+    return {"conv1": ShapeSpec(channels=64, stride=16)}
+
+```
+
+在这段代码中，我们按照 ``Backbone`` 类的接口实现了一个新的 ``backbone``，并将其注册到需要 ``Backbone`` 子类的 ``BACKBONE_REGISTRY`` 中。导入此代码后，detectron2 可以将类的名称链接到它的实现。因此可以编写如下代码：
+
+```python
+cfg = ...   # read a config
+cfg.MODEL.BACKBONE.NAME = 'ToyBackbone'   # or set it in the config file
+model = build_model(cfg)  # it will find `ToyBackbone` defined above
+```
+
+再举一个例子，要在通用 R-CNN 元架构中为 ROI 头添加新功能，您可以实现一个新的 ``ROIHeads`` 子类并将其放入 ``ROI_HEADS_REGISTRY``。 ``DensePose`` 和 ``MeshRCNN`` 是实现新 ROIHeads 以执行新任务的两个示例。并且 ``projects/`` 包含更多实现不同架构的示例。
+可以在 [API 文档](https://detectron2.readthedocs.io/en/latest/modules/modeling.html#model-registries)中找到完整的注册表列表。您可以在这些注册表中注册组件以自定义模型的不同部分或整个模型。
+
+### 2.2. 使用显式参数构建模型
+
+注册表是将配置文件中的名称连接到实际代码的桥梁。它们旨在涵盖用户经常需要更换的几个主要组件。然而，基于文本的配置文件的功能有时是有限的，一些更深层次的定制可能只能通过编写代码来实现。
+detectron2 中的大多数模型组件都有一个清晰的 ``__init__`` 接口，用于记录它需要的输入参数。使用自定义参数调用它们将为您提供模型的自定义变体。
+例如，要在 Faster R-CNN 的 box head 中使用自定义损失函数，我们可以执行以下操作：
+
+1. 目前在 ``FastRCNNOutputLayers`` 中计算损失。我们需要实现它的变体或子类，使用自定义损失函数，命名为 MyRCNNOutput。
+2. 使用 ``box_predictor=MyRCNNOutput()`` 参数而不是内置的 ``FastRCNNOutputLayers`` 调用 ``StandardROIHeads``。如果所有其他参数应保持不变，这可以通过使用可配置的 ``__init__`` 机制轻松实现：
+
+```python
+roi_heads = StandardROIHeads(
+  cfg, backbone.output_shape(),
+  box_predictor=MyRCNNOutput(...)
+)
+```
+
+3. （可选）如果我们想从配置文件中启用这个新模型，则需要注册：
+
+```python
+@ROI_HEADS_REGISTRY.register()
+class MyStandardROIHeads(StandardROIHeads):
+  def __init__(self, cfg, input_shape):
+    super().__init__(cfg, input_shape,
+                     box_predictor=MyRCNNOutput(...))
+```
