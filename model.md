@@ -141,3 +141,88 @@ RDN、MEGA等效果最好的自然视频检测模型采用了 Faster R-CNN 中�
 多发病灶的漏检很可能是 RDN 模型中单个 Relation 模块需要承担的任务太多导致 的。RDN 中一个 relation 模块既需要学习帧内的信息来判断是否为病灶，又需要学习帧间的信息来微调预测框。而 RDN 中为同一个模块负责，可能导致每个任务都无法学到最好。
 
 </details>
+
+
+#### 2.2.7. UltraDet模型
+
+![](file/UltraDet.png)
+
+#### 2.2.7.1. 骨架网络
+
+**Backbone** 采用计算机视觉中最经典的 ResNet。ResNet 主要解决的问题是神 经网络效果随深度增加出现“饱和”的现象，层数增加到一定深度网络的效果反而会下 降。这并非过拟合问题，因为训练误差呈现相同的“饱和”趋势。如果增加的层都学到恒 等映射，效果也不会比浅层的网络更差。
+
+Backbone 采用的 ResNet 系列网络根据参数量可分为多种不同架构，本文最终采用Res34 网络结构。采用更大 Res50 会造成在 backbone 处耗时过长，并且存在过拟合的 可能性。而采用更小 Res18 会导致模型的性能下降。
+
+**特征金字塔** 在自然视频检测数据集中，采用特征金字塔（Feature pyramid Network，FPN）能够结合不同尺度的信息，以更好地检测出小物体。然而在超声视频数据 集中，病灶的大小差异没有自然数据集那么悬殊，采用 FPN 反而会导致不同层之间的 物体特征有分辨率上的差别，从而难以很好地交换信息。实验表明，不采用 FPN 可以 得到更好的效果。同时为了提高速度，我们改变原来采用 FPN 的 {p2,p3,p4,p5,p6,p7} 作 为 RoI Head 的输入的做法，只采用 Res34 的 C4 层作为 RoI Head 的输入，大大提高了 RoI Head 速度的同时效果并没有下降。这也是超声视频检测与自然视频检测的一大不 同之处。
+
+**Conv-LSTM** 1997 年提出的长短时记忆网络（LSTM）模型是自然语言处理中 最常用的经典循环神经网络模型之一，直到 2018 年才逐渐被 Transformer 取代。RNN 通过循环更新参数，提取并结合一个序列的信息。LSTM 通过巧妙的结构设计解决了 普通 RNN 的梯度消失和梯度爆炸问题。可以在 backbone 中利用 LSTM 的卷积版本 （Conv-LSTM）来结合多帧的特征图，以达到在 RoI Head 之前就使特征图初步结合其他 帧的信息的效果。这里的结合是全图层面的结合，还没有各个 Candidates 层面的信息 交互。
+
+#### 2.2.7.2. 检测头
+
+检测头或者 RoI Head（Region of Interest Head）承担了从特征图中提取可能是病灶 的区域（即 Candidates），并进行信息结合以微调，最终给出检测框以及置信度的任务。 
+
+**Candidates Extractor 模块** 借鉴 Faster R-CNN中提出的 RPN 模块，本文提出 的 UltraDet 模型也采用两阶段的方法：第一阶段由一个 Candidadtes Extractor 从全图的 特征图中提取 Candidates；第二阶段对 Candidates 的特征做进一步加工并输出预测框和 对应的置信度。 为了不使帧间的信息交互影响到帧内 Candidates 的提取，DRF 模型采用未经过 Conv-LSTM 的特征图进行帧内的 Candidates 提取，而提取完 Candidates 后采用经过 Conv-LSTM 的特征图进行 RoI Align。
+
+**Relation Encoder-Decoder 模块** Candidates需要结合帧内语义信息来更好地判断它是一个病灶还是只是普通腺体；需要结合帧间 位置信息来更好地确定病灶的边缘位置。比如某一帧边缘模糊的病灶在前一帧的边缘 较清晰，则结合了前一帧病灶的位置信息可以辅助本帧病灶位置的判断。故 UltraDet 模型采用了 Relation 模块进行帧内、帧间的信息结合。为了更好地通过 Relation 模块结 合帧内和帧间的信息，本文设计了 Relation Encoder-Decoder 模块，通过先编码后解码 的流程使语义信息和位置信息的结合更加充分。
+
+**Classification Head** 与传统的 Faster R-CNN 并没有太大不同，通过 𝑀 层 MLP， 将充分结合信息之后的 candidates 特征向量的通道数压缩到类别数。得到前景置信度 后可以通过 Softmax Cross Entropy Loss或者 Focal Loss来计算与标注的差距。本文 中第一阶段的 Frame Specific Candidates Extractor 采用 Focal Loss 模块，因为正负样本 差距较悬殊；第二阶段 Relation Encoder-Decoder 模块采用的是 Softmax Cross Entropy Loss。
+
+**Regression Head** 定义一个框 𝑏 = (𝑥0, 𝑦0, 𝑥1, 𝑦1) 其中 (𝑥0, 𝑦0) 是框左上角点的坐标， (𝑥1, 𝑦1) 是框右下角点的坐标。通过 𝑀 层 MLP（与分类 Head 不共享参数）将每个 candidate 的特征向量映射到四维。得到预测框后可以通过 𝐿1 Loss 或者 Smooth 𝐿1 Loss 来计算与标注的差距。也可以通过 IoU Loss 或者 GIoU Loss来计算损失。本 文中第一阶段的 Frame Specific Candidates Extractor 回归的目标是每个“预测者”到预 测框的边的上下左右距离，采用的是 GIoU Loss；第二阶段 Relation Encoder-Decoder 模 块采用预测的是标注框与第一阶段预测框的差距采用的是 Smooth 𝐿1 Loss。
+
+
+#### 2.2.7.3. 代码结构
+
+和pytorch中的Faster R-CNN类似，d2检测模型的结构也是meta-arch+x模块化的。配置文件中关于模型的部分摘录如下
+
+
+``configs/RDN-LSTM/BUS-RDN_LSTM.yaml``
+```yaml
+MODEL:
+  WEIGHTS: "pretrained_models/r34.pkl"
+  PIXEL_MEAN: [123.675, 116.280, 103.530]
+  PIXEL_STD: [58.395, 57.120, 57.375]
+  META_ARCHITECTURE: "TemporalRCNN"
+  ROI_HEADS:
+    NAME: "Res5TemporalROIBoxHeads"
+    PROPOSAL_APPEND_GT: True
+  ROI_BOX_HEAD:
+    INTERVAL_PRE_TEST: 12
+    INTERVAL_AFTER_TEST: 3
+  RESNETS:
+    DEPTH: 34
+    STRIDE_IN_1X1: False
+    RES2_OUT_CHANNELS: 64
+  RPN:
+    POST_NMS_TOPK_TEST: 16
+  ANCHOR_GENERATOR:
+    ASPECT_RATIOS: [[0.33, 0.5, 0.66, 1.0, 2.0, 3.0]]
+    SIZES: [[32, 64, 128, 256, 512]]
+```
+
+``configs/RDN-LSTM/BUS_BasicConfig_StaticFrame.yaml``
+```yaml
+_BASE_: "MIXED-RDN_LSTM.yaml"
+MODEL:
+  ORGAN_SPECIFIC:
+    ENABLE: ("cls", "rpn_cls")
+  BACKBONE:
+    FREEZE_AT: 1
+    NAME: "build_resnet_backbone_mix_style"
+  RESNETS:
+    HALF_CHANNEL: True
+  USE_LSTM: True
+  PROPOSAL_GENERATOR:
+    NAME: "DeFCN"
+  DeFCN:
+    NMS_THRESH_TEST: 0.7
+    NMS_TYPE: "normal"
+    FOCAL_LOSS_GAMMA: 2.0
+    FOCAL_LOSS_ALPHA: 0.9
+    IN_FEATURES: [ "res4" ]
+    FPN_STRIDES: [ 16 ]
+    NUM_PROPOSALS: 12
+  ROI_BOX_HEAD:
+    INTERVAL_PRE_TEST: 11
+    INTERVAL_AFTER_TEST: 0
+```
+
