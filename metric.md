@@ -30,3 +30,22 @@ $$FN =  | \{i\in I | \forall j \in J, \text{IoU} (b_i, \hat{b}_j ) \leq 0.5 \}  
 
 $$\text{Precision} = \frac{\text{TP}}{ (\text{TP} + \text{FP} )},\text{Recall} = \frac{\text{TP}}{ (\text{TP} + \text{FN} )}$$
 
+**mAP** 为了评价模型的整体效果，需要固定模型对每一帧都输出$k$个预测框$\{b^1,\cdots,b^k\}$以及对应的置信度$\{s^1,\cdots,s^k\}$，其中$s^i\in [0,1]$。取不同的置信度阈值$S$，计算预测框集$B_S = \{b^i | i \in I, s^i > S \}$对应的 Precision 和 Recall，可以得到一条 PrecisionRecall 曲线。定义曲线与 x 轴 y 轴组成的封闭图形的面积为 AP（Average Precision），如 果有多分类任务，则不同类别的 AP 取均值记为 mAP（mean Average Precision）。
+
+**$\text{mAP}_s$ 和 $\text{mAP}_i$**将标注框面积在所有框面积的 1/3 分位数（对应正方形框的边长为 151 个像素）以下的标注框作为小物体，所有小物体的 mAP 作为 $\text{mAP}_s$。同理，将标 注框面积在所有框面积的 2/3 分位数（对应正方形框的边长为 226 个像素）以上的标注 框作为大物体，所有大物体的 mAP 作为 $\text{mAP}_i$。
+
+## 2. 视频评价指标
+
+以上定义均在单帧实现，下面将评价指标由单帧推广到视频。
+
+**视频 mAP 和 multi_mAP** 对单帧计算 mAP，然后对于同一视频的所有帧计算平 均 mAP，再对所有视频计算平均视频 mAP，得到测试集上的 mAP。为了刻画模型在 多发帧上的检出效果，可以计算视频的 multi_mAP，即对视频内所有多发帧上的 mAP 取平均得到视频的 multi_mAP。
+
+**Average Recall** 前文已经提到召回率对于医疗影像的辅助诊断来说是非常重要
+
+![](file/Precision_Recall_Curve.png)
+
+的指标。固定每一帧给出$k$个预测框，对于每一帧都计算一个召回率值，然后对整个 视频的所有帧取平均即得到了视频的 Average Recall，再对测试集中的每个视频取平均 即得到测试集的 Average Recall。
+
+**视频 FP** 定义连续的多帧同一个病灶的框为一段病灶框，则视频 FP 为单位时间 内有多少段 FP（如 2 段/分钟），即视频内总的 FP 段数除以视频的时长（以分钟为单 位）得到单个视频的 FP，再对整个测试集平均得到测试集的 FP 值。计算 FP 值必须在 固定的召回率下进行，否则在进行任何预测的时候 FP 就能达到最小值 0。本文采纳固 定召回率为 0.8 时的 FP 值，单位是“段/分钟”。
+
+**FPS** 每秒能够处理多少帧，视频的播放速度是 30FPS，要达到实时效果，模型 也需要至少 30FPS 的处理能力。
