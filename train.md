@@ -74,4 +74,355 @@ if self.training:
 
 ## 4. Ultrasound VID的训练流程
 
-这部分基于项目代码介绍Ultrasound VID中的训练流程
+这部分基于项目代码介绍Ultrasound VID中的训练流程。相关代码位于``tools/train_net.py``中。
+
+首先，获取bash输入的参数，启动分布式训练。
+
+```python
+from detectron2.engine import launch
+
+args = default_argument_parser().parse_args()
+print("Command Line Args:", args)
+# e.g. Command Line Args: Namespace(config_file='configs/RDN-LSTM/BUS_BasicConfig_20221108_hardmining_fp_thresh0.6_by_video_rate0.1_fold0_iter_10w.yaml', dist_url='tcp://127.0.0.1:59166', eval_only=False, machine_rank=0, num_gpus=8, num_machines=1, opts=[], resume=False)
+launch(
+    main,
+    args.num_gpus,
+    num_machines=args.num_machines,
+    machine_rank=args.machine_rank,
+    dist_url=args.dist_url,
+    args=(args,),
+)   # 在分布式训练的情况下，执行main(args)
+```
+
+函数``main``根据参数配置，进行训练前的准备
+
+```python
+from detectron2.utils.comm import is_main_process
+from detectron2.checkpoint import DetectionCheckpointer
+from ultrasound_vid.utils.miscellaneous import backup_code
+from datetime import datetime
+
+def main(args):
+    cfg = setup(args)   # 解析配置文件，根据配置文件初始化训练所需要的参数
+    output_dir = cfg.OUTPUT_DIR
+    if is_main_process():   # 只在主进程中执行
+        hash_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_code(
+            os.path.abspath(os.path.curdir),
+            os.path.join(output_dir, "code_" + hash_tag),
+        )   # 备份代码
+    if args.eval_only:  # 验证模式
+        model = Trainer.build_model(cfg)    # 这里没有对Trainer进行实例化，只调用了其中的方法，因为Trainer.test中写了测试需要的一切
+        DetectionCheckpointer(model, save_dir=cfg.OUTPUT_DIR).resume_or_load(
+            cfg.MODEL.WEIGHTS, resume=args.resume
+        )   # 载入checkpoint
+        res = Trainer.test(cfg, model)  # 测试模式
+        return res
+
+    trainer = Trainer(cfg)  # 训练模式
+    trainer.resume_or_load(resume=args.resume)
+    return trainer.train()
+```
+
+类``Trainer``继承于``DefaultTrainer``，包括训练所需要的所有内容；``classmethod`` 修饰符对应的函数不需要实例化，不需要 ``self`` 参数，但第一个参数需要是表示自身类的 ``cls`` 参数，可以来调用类的属性，类的方法，实例化对象等。
+
+```python
+from detectron2.engine import DefaultTrainer
+import detectron2.utils.comm as comm
+from detectron2.evaluation import DatasetEvaluator
+
+from ultrasound_vid.data import (
+    build_video_detection_train_loader,
+    build_video_detection_test_loader,
+    build_video_detection_train_hardmining_fp_loader,
+)
+
+from torch.nn.parallel import DistributedDataParallel
+class Trainer(DefaultTrainer):
+    def __init__(self, cfg):
+        """
+        Set "find_unused_parameters=True" to prevent empty gradient bug.
+        Set "refresh period" to refresh dataloader periodicly when datasets are
+        modified during training.
+        """
+        super().__init__(cfg)
+        if comm.get_world_size() > 1:
+            model = DistributedDataParallel(
+                self.model.module,
+                device_ids=[comm.get_local_rank()],
+                broadcast_buffers=False,
+                find_unused_parameters=True,
+                check_reduction=False,
+            )
+            self.model = model
+
+        self.refresh_period = self.cfg.DATALOADER.REFRESH_PERIOD
+        if self.refresh_period > 0:
+            self.register_hooks(
+                [RefreshDataloaderHook(self.cfg.DATALOADER.REFRESH_PERIOD)]
+            )
+
+            # Ugly! Trying to solve this.
+            self.sample_name = cfg.DATALOADER.SAMPLER_TRAIN
+            self.frame_sampler = (
+                self.data_loader.sampler.data_source._map_func._obj.frame_sampler
+            )
+
+    @classmethod
+    def build_evaluator(cls, cfg, dataset_name, output_folder=None):
+        if output_folder is None:
+            output_folder = os.path.join(cfg.OUTPUT_DIR, "inference")
+        return DatasetEvaluator()
+
+    @classmethod
+    def build_test_loader(cls, cfg, dataset_name):
+        return build_video_detection_test_loader(cfg, dataset_name)
+
+    @classmethod
+    def build_train_loader(cls, cfg):
+        if cfg.DATASETS.SAMPLE_FP_BY_VIDEO:
+            return build_video_detection_train_hardmining_fp_loader(cfg)
+        return build_video_detection_train_loader(cfg)
+
+    @classmethod
+    def build_optimizer(cls, cfg, model):
+        optimizer_type = cfg.SOLVER.get("OPTIMIZER", "SGD")
+        if is_main_process():
+            print(f"Using optimizer {optimizer_type}")
+        if optimizer_type == "SGD":
+            optimizer = super().build_optimizer(cfg, model)
+            return optimizer
+
+        params: List[Dict[str, Any]] = []
+        memo: Set[torch.nn.parameter.Parameter] = set()
+        for key, value in model.named_parameters(recurse=True):
+            if not value.requires_grad:
+                continue
+            # Avoid duplicating parameters
+            if value in memo:
+                continue
+            memo.add(value)
+            lr = cfg.SOLVER.BASE_LR
+            weight_decay = cfg.SOLVER.WEIGHT_DECAY
+            if "backbone" in key and "BACKBONE_MULTIPLIER" in cfg.SOLVER:
+                lr = lr * cfg.SOLVER.BACKBONE_MULTIPLIER
+            if "sample_module" in key and "LSTM_MULTIPLIER" in cfg.SOLVER:
+                lr = lr * cfg.SOLVER.LSTM_MULTIPLIER
+            params += [{"params": [value], "lr": lr, "weight_decay": weight_decay}]
+
+        if optimizer_type.upper() == "ADAMW":
+            optimizer = torch.optim.AdamW(
+                params,
+                cfg.SOLVER.BASE_LR,
+                betas=cfg.SOLVER.ADAM_BETA,
+                weight_decay=cfg.SOLVER.WEIGHT_DECAY,
+            )
+        else:
+            raise NotImplementedError(f"no optimizer type {optimizer_type}")
+        if not cfg.SOLVER.CLIP_GRADIENTS.CLIP_TYPE == "full_model":
+            optimizer = maybe_add_gradient_clipping(cfg, optimizer)
+        return optimizer
+
+    @classmethod
+    def test(cls, cfg, model, evaluators=None):
+        """
+        Args:
+            cfg (CfgNode):
+            model (nn.Module):
+            evaluators (list[DatasetEvaluator] or None): if None, will call
+                :meth:`build_evaluator`. Otherwise, must have the same length as
+                `cfg.DATASETS.TEST`.
+
+        Returns:
+            dict: a dict of result metrics
+        """
+        logger = logging.getLogger("ultrasound_vid")
+        output_dir = cfg.OUTPUT_DIR
+        os.makedirs(os.path.join(output_dir, "predictions"), exist_ok=True)
+        rpn_only = cfg.MODEL.META_ARCHITECTURE == "TemporalProposalNetwork"
+        # save_folder = os.path.join(output_dir, "predictions")
+        results = OrderedDict()
+        for _, hospital_name in enumerate(cfg.DATASETS.BUS_TEST):
+            if cfg.DEVICE_WISE:
+                device_list = []
+                for k in DatasetCatalog.list():
+                    if "@" not in k:
+                        continue
+                    parts = k.split("@")
+                    if (
+                        parts[0] == hospital_name
+                        and len(parts) == 3
+                        and parts[1] == cfg.DATASETS.BUS_TIMESTAMP
+                    ):
+                        device_list.append(parts[-1])
+
+                # 将部分机型进行聚合，避免机型太过于分散
+                group_mapping = {}
+                for idx, group in enumerate(cfg.DATASETS.GROUP):
+                    for item in group:
+                        group_mapping[item] = idx
+
+                device_list_group = []
+                vis_group = set()
+                mem = defaultdict(list)
+                for device in device_list:
+                    if hospital_name + "@" + device in group_mapping:
+                        idx = group_mapping[hospital_name + "@" + device]
+                        mem[idx].append(device)
+                    else:
+                        if str(device) not in vis_group:
+                            device_list_group.append([device])
+                            vis_group.add(str(device))
+                for k in mem:
+                    if str(mem[k]) not in vis_group:
+                        device_list_group.append(mem[k])
+                        vis_group.add(str(mem[k]))
+                logger.info(pformat((hospital_name, device_list_group)))
+
+                for device in device_list_group:
+                    dataset_name = [
+                        "@".join([hospital_name, cfg.DATASETS.TIMESTAMP, d])
+                        for d in device
+                    ]
+                    data_loader = cls.build_test_loader(cfg, dataset_name)
+                    if data_loader is None:
+                        continue
+                    results_i = inference_on_video_dataset(
+                        model,
+                        data_loader,
+                        dataset_name,
+                        save_folder=output_dir,
+                        rpn_only=rpn_only,
+                    )
+                    if isinstance(dataset_name, list):
+                        dataset_name = sorted(dataset_name)[0]
+                    results[dataset_name] = results_i
+                    if comm.is_main_process():
+                        assert isinstance(
+                            results_i, dict
+                        ), "Evaluator must return a dict on the main process. Got {} instead.".format(
+                            results_i
+                        )
+                        logger.info(
+                            "Evaluation results for {} in csv format:".format(
+                                dataset_name
+                            )
+                        )
+                        print_csv_format(results_i)
+            else:
+                dataset_name = "@".join(
+                    ["breast_" + hospital_name, cfg.DATASETS.BUS_TIMESTAMP]
+                )
+                data_loader = cls.build_test_loader(cfg, [dataset_name])
+                results_i = inference_on_video_dataset(
+                    model,
+                    data_loader,
+                    dataset_name,
+                    save_folder=output_dir,
+                    rpn_only=rpn_only,
+                )
+                results[dataset_name] = results_i
+                if comm.is_main_process():
+                    assert isinstance(
+                        results_i, dict
+                    ), "Evaluator must return a dict on the main process. Got {} instead.".format(
+                        results_i
+                    )
+                    logger.info(
+                        "Evaluation results for {} in csv format:".format(dataset_name)
+                    )
+                    print_csv_format(results_i)
+
+        for _, hospital_name in enumerate(cfg.DATASETS.TUS_TEST):
+            if cfg.DEVICE_WISE:
+                device_list = []
+                for k in DatasetCatalog.list():
+                    if "@" not in k:
+                        continue
+                    parts = k.split("@")
+                    if (
+                        parts[0] == hospital_name
+                        and len(parts) == 3
+                        and parts[1] == cfg.DATASETS.TUS_TIMESTAMP
+                    ):
+                        device_list.append(parts[-1])
+
+                # 将部分机型进行聚合，避免机型太过于分散
+                group_mapping = {}
+                for idx, group in enumerate(cfg.DATASETS.GROUP):
+                    for item in group:
+                        group_mapping[item] = idx
+
+                device_list_group = []
+                vis_group = set()
+                mem = defaultdict(list)
+                for device in device_list:
+                    if hospital_name + "@" + device in group_mapping:
+                        idx = group_mapping[hospital_name + "@" + device]
+                        mem[idx].append(device)
+                    else:
+                        if str(device) not in vis_group:
+                            device_list_group.append([device])
+                            vis_group.add(str(device))
+                for k in mem:
+                    if str(mem[k]) not in vis_group:
+                        device_list_group.append(mem[k])
+                        vis_group.add(str(mem[k]))
+                logger.info(pformat((hospital_name, device_list_group)))
+
+                for device in device_list_group:
+                    dataset_name = [
+                        "@".join([hospital_name, cfg.DATASETS.TIMESTAMP, d])
+                        for d in device
+                    ]
+                    data_loader = cls.build_test_loader(cfg, dataset_name)
+                    if data_loader is None:
+                        continue
+                    results_i = inference_on_video_dataset(
+                        model,
+                        data_loader,
+                        dataset_name,
+                        save_folder=output_dir,
+                        rpn_only=rpn_only,
+                    )
+                    if isinstance(dataset_name, list):
+                        dataset_name = sorted(dataset_name)[0]
+                    results[dataset_name] = results_i
+                    if comm.is_main_process():
+                        assert isinstance(
+                            results_i, dict
+                        ), "Evaluator must return a dict on the main process. Got {} instead.".format(
+                            results_i
+                        )
+                        logger.info(
+                            "Evaluation results for {} in csv format:".format(
+                                dataset_name
+                            )
+                        )
+                        print_csv_format(results_i)
+            else:
+                dataset_name = "@".join(
+                    ["thyroid_" + hospital_name, cfg.DATASETS.TUS_TIMESTAMP]
+                )
+                data_loader = cls.build_test_loader(cfg, [dataset_name])
+                results_i = inference_on_video_dataset(
+                    model,
+                    data_loader,
+                    dataset_name,
+                    save_folder=output_dir,
+                    rpn_only=rpn_only,
+                )
+                results[dataset_name] = results_i
+                if comm.is_main_process():
+                    assert isinstance(
+                        results_i, dict
+                    ), "Evaluator must return a dict on the main process. Got {} instead.".format(
+                        results_i
+                    )
+                    logger.info(
+                        "Evaluation results for {} in csv format:".format(dataset_name)
+                    )
+                    print_csv_format(results_i)
+
+        return results
+```
